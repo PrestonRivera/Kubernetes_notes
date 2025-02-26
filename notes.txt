@@ -38,7 +38,9 @@ However, because we've now updated it with kubectl apply, the annotation is now 
 
 -------------------
 
-Create a deployment file then run- kubectl apply -f <deployment yaml filename>
+Create a deployment file then run: 
+
+kubectl apply -f <deployment yaml filename>
 
 -------------------
 
@@ -58,4 +60,208 @@ Because Kubernetes is all about building self-healing systems, it will automatic
 To fix a thrashing pod, you need to find out why it's crashing.
 
 -------------------
+
+Get kist of pods: 
+kubectl get pods
+
+Get the logs for a specified pod:
+kubectl logs <pod-name>
+
+-------------------
+
+When making changes to a .yaml file always apply changes:
+
+kubectl apply -f <.yaml file> 
+
+** with config maps it doesnt apply to the pod, it just creates and stores the config map in k8.
+
+Real organizations store their Kubernetes configurations (like your ConfigMap) in YAML files and keep them in version control (like Git). This means:
+
+Changes can be tracked
+Multiple team members can review changes
+You can roll back to previous versions if needed
+Repeatability: Using YAML files means you can:
+
+Set up the same environment in development, staging, and production
+Quickly recover if something goes wrong
+Share configurations with team members
+GitOps: Many organizations use GitOps practices where:
+
+All changes to infrastructure are made through git
+CI/CD pipelines automatically run kubectl apply -f when changes are merged
+
+------------------------
+
+- Applying the Config Map
+
+Open up your api-deployment.yaml file. We're going to add a few things to it. Under the containers section, add the following to the first (and only) entry:
+
+env:
+  - name: API_PORT
+    valueFrom:
+      configMapKeyRef:
+        name: synergychat-api-configmap
+        key: API_PORT
+
+This tells Kubernetes to set the API_PORT environment variable to the value of the API_PORT key in the synergychat-api-configmap config map. Reference the official docs if you're confused about the structure of the yaml.
+
+Next, apply the deployment. Hopefully, you remember the command for this by now.
+
+Once it's applied, you should be able to take a look at the pods and see that a new API pod has been deployed and isn't crashing!
+
+Let's forward the API pod's 8080 port to our local machine so we can test it out.
+
+kubectl port-forward <pod-name> 8080:8080
+
+Make sure it returns a 404 response when you hit the root:
+
+curl http://localhost:8080
+
+-------------------------
+
+Config Maps Are Insecure
+ConfigMaps are a great way to manage innocent environment variables in Kubernetes. Things like:
+
+Ports
+URLs of other services
+Feature flags
+Settings that change between environments, like DEBUG mode
+However, they are not cryptographically secure. ConfigMaps aren't encrypted, and they can be accessed by anyone with access to the cluster.
+
+If you need to store sensitive information, you should use Kubernetes Secrets or a third-party solution.
+
+-------------------------
+
+We can use the envFrom key instead of the env key to reference the entire config map and make it available to the pods in the deployment:
+
+instead of this:
+
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: synergychat-api
+  template:
+    metadata:
+      labels:
+        app: synergychat-api
+    spec:
+      containers:
+      - name: synergychat-api
+        image: bootdotdev/synergychat-api:latest
+        env: # reference from here down #
+          - name: API_PORT
+            valueFrom:
+              configMapKeyRef: 
+                name: synergychat-api-configmap
+                key: API_PORT
+          - name: THING_TWO
+            valueFrom:
+              configMapKeyRef:
+                name: synergychat-api-congigmap
+                key: THING_TWO
+          - name: THING_THREE
+            ...
+
+we can use envFrom:
+
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: synergychat-crawler
+  template:
+    metadata:
+      labels:
+        app: synergychat-crawler
+    spec:
+      containers:
+      - name: synergychat-crawler
+        image: bootdotdev/synergychat-crawler:latest
+        envFrom:
+          - configMapRef:
+              name: synergychat-crawler-configmap
+
+----------------------
+
+Services
+We've spun up pods and connected to them individually, but that's frankly not super useful if we want to distribute real traffic across those pods. That's where services come in.
+
+Services provide a stable endpoint for pods. They are an abstraction used to provide a stable endpoint and load balance traffic across a group of Pods. By "stable endpoint", 
+I just mean that the service will always be available at a given URL, even if the pod is destroyed and recreated.
+
+Create a file called web-service.yaml and add the following:
+
+apiVersion: v1
+kind: Service
+metadata/name: web-service (we could call it anything, but this is a fine name)
+spec/selector/app: I'm going to let you figure out what should be here. This is how the service knows which pods to route traffic to.
+spec/ports: An array of port objects. You need one entry:
+protocol: TCP (TCP will allow us to use HTTP)
+port: 80 (this is the port that the service will listen on)
+targetPort: 8080 (this is the port that the pods are listening on)
+This creates a new service called web-service with a few properties:
+
+It listens on port 80 for incoming traffic
+It forwards that traffic to pods that are listening on their port 8080
+Its controller will continuously scan for pods matching the app: synergychat-web label selector and automatically add them to its pool
+
+
+Now, let's forward the service's port to our local machine so we can test it out.
+
+kubectl port-forward service/web-service 8080:80
+
+----------------------
+
+Service Types
+Take a look at the yaml that describes your web-service.
+
+kubectl get svc web-service -o yaml
+
+"svc" is a short-hand alias for "service", either will work in kubectl.
+
+You should see a section that looks like this:
+
+spec:
+  clusterIP: 10.96.213.234
+  ...
+  type: ClusterIP
+
+We didn't specify a service type! Why is this here? Well, it's because ClusterIP is the default service type.
+
+The clusterIP is the IP address that the service is bound to on the internal Kubernetes network. Remember how we talked about how pods get their own internal, 
+virtual IP address? Well, services can too! However, type: ClusterIP is just one type of service! There are several others, including:
+
+- NodePort: Exposes the Service on each Node's IP at a static port.
+
+- LoadBalancer: Creates an external load balancer in the current cloud environment (if supported, e.g. AWS, GCP, Azure) and assigns a fixed, external IP to the service.
+
+- ExternalName: Maps the Service to the contents of the externalName field (for example, to the hostname api.foo.bar.example). 
+
+The mapping configures your cluster's DNS server to return a CNAME record with that external hostname value. No proxying of any kind is set up.
+The interesting thing about service types is that they typically build on top of each other. For example, 
+a NodePort service is just a ClusterIP service with the added functionality of exposing the service on each node's IP at a static port (it still has an internal cluster IP).
+
+A LoadBalancer service is just a NodePort service with the added functionality of creating an external load balancer in the current cloud environment (it still has an internal cluster IP and node port).
+
+An ExternalName service is actually a bit different. All it does is a DNS-level redirect. You can use it to redirect traffic from one service to another.
+
+-------------------------
+
+When a request comes in:
+
+Web service receives user request
+Web service calls api-service using its internal DNS name (like api-service.default.svc.cluster.local)
+API service processes request, maybe calls crawler-service for data
+Data flows back up the chain
+
+Why Separate These Components?:
+Scalability: Each component can scale independently
+Isolation: If crawler fails, web and API might still work
+Maintenance: Can update one component without touching others
+
+Service Discovery:
+Kubernetes automatically creates internal DNS entries
+Services find each other using consistent names
+If a pod dies, service redirects traffic to healthy pods
 
