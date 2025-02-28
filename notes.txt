@@ -265,3 +265,122 @@ Kubernetes automatically creates internal DNS entries
 Services find each other using consistent names
 If a pod dies, service redirects traffic to healthy pods
 
+--------------------
+
+DNS
+Now that we've configured the ingress to route the domains:
+
+synchat.internal to the web-service
+synchatapi.internal to the api-service
+We need to configure our local machine to resolve those domains to the ingress load balancer. We won't be setting up global DNS so that anyone on the internet can access our app! 
+We'll just be configuring our local machine to resolve those domains to the ingress load balancer.
+
+To resolve hostnames to IP addresses locally you can edit /etc/hosts file as an administrator in both WSL and PowerShell
+
+I added these lines:
+
+127.0.0.1 synchat.internal
+127.0.0.1 synchatapi.internal
+
+to PowerShell: notepad C:\Windows\System32\drivers\etc\hosts
+
+to WSL: vim /etc/hosts
+
+---------------------
+
+
+Great question! The "network resolution process" refers to how a request travels from your browser to the actual Kubernetes pod running your application.
+
+Let's break down the steps in order:
+
+- DNS (/etc/hosts): When you type synchat.internal in your browser, your computer needs to figure out what IP address that domain points to. It checks your /etc/hosts file (which we modified earlier) 
+  and finds that it points to 127.0.0.1.
+
+- IP address: Now your browser knows to send the request to 127.0.0.1 (localhost), which is where the minikube tunnel is listening.
+
+- Ingress controller: The request reaches the ingress controller (like NGINX) running in your Kubernetes cluster. The ingress controller looks at the host header (synchat.internal) 
+  and path to determine which service should receive this request.
+
+- Service: The ingress routes your request to the appropriate Kubernetes service, which acts as a stable internal address and load balancer for your pods.
+
+- Pod: Finally, the service forwards the request to one of the available pods running your application.
+
+---------------------
+
+In production, the process would look more like this:
+
+- DNS (real DNS servers): When users type your domain (like example.com), their request goes to real DNS servers on the internet, which resolve to your cloud provider's load balancer IP address.
+
+- IP address: Traffic reaches your cloud provider's load balancer IP.
+
+- Ingress controller: The load balancer forwards traffic to your Kubernetes ingress controller.
+
+- Service: The ingress routes to the appropriate service.
+
+- Pod: The service routes to a pod.
+
+--- The localhost and /etc/hosts approach we're using is just a development convenience that mimics production while letting you work locally. In production, you'd:
+
+- Register a real domain name
+- Configure DNS to point to your cloud load balancer
+- Set up TLS certificates for HTTPS
+
+---------------------
+
+DNS stands for Domain Name System. It's essentially the internet's phone book that translates human-friendly domain names (like google.com) into IP addresses (like 142.250.190.78) 
+that computers use to identify each other.
+
+TLS stands for Transport Layer Security. It's a cryptographic protocol that provides secure communication over a computer network. When you see HTTPS instead of HTTP in your browser, 
+that "S" means the connection is secured with TLS. This ensures that data exchanged between your browser and the website is encrypted and can't be easily intercepted or tampered with.
+
+---------------------
+
+- Ingress Types
+You may have noticed that at the top of all our resources we have this in the yaml:
+
+apiVersion: v1
+
+This is the API version of the resource, and because those resources are core to Kubernetes, they're in the standard v1 API group.
+
+However, ingress isn't a core Kubernetes resource, it's an extension of sorts. That's why it has:
+
+apiVersion: networking.k8s.io/v1
+
+You can think of the networking.k8s.io API group as a core extension. It's not third-party (it's on k8s.io for heaven's sake), but it's not part of the core Kubernetes API either.
+
+-----------------------
+
+Annotations
+You probably noticed that we used a single annotation on our ingress resource:
+
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+
+This is a really common pattern in Kubernetes. The core Kubernetes API is intentionally kept small, but there are a lot of things that people want to do with Kubernetes that aren't part of the core API. 
+So, instead of adding a bunch of new fields to the core API, Kubernetes allows you to add arbitrary annotations to your resources, and then various extensions can read those annotations and do things with them.
+
+For example, the Boot.dev Kubernetes cluster uses an ingress extension specific to Google Cloud Platform. We use the following annotations so that our controller knows which static IP address to use, 
+which SSL certificate to use, and how to route traffic to our ingress:
+
+  annotations:
+    kubernetes.io/ingress.global-static-ip-name: static-ip-name-here
+    networking.gke.io/managed-certificates: cert-name-here
+    kubernetes.io/ingress.class: gce
+
+If you're curious about the specifics, the docs are here. In a nutshell, however, the important take-away is that in most production deployments you'll be using annotations specific to the cloud provider you're using. 
+Each major cloud provider has their own products, so you need to use k8s annotations and extensions specific to that cloud provider.
+
+Now that you understand the basic concepts of ingress, in the future, it's just a matter of following the documentation for your cloud provider to get it set up.
+
+
+When you see https instead of http it means your using TLS which a security protocol that created an encrypted connection between the web server and the browser.
+SSL = Secure Sockets Layer
+TLS = Transport Layer Security
+
+-------------------------
+
+Use this to restart a deployment after updating and appying a config map:
+kubectl rollout restart deployment <deployment name> Use <kubectl get deployment> to get deployment name. 
+
+minikube tunnel -c
+minikube dashboard --port=63840
