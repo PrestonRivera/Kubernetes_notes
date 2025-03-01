@@ -379,8 +379,226 @@ TLS = Transport Layer Security
 
 -------------------------
 
+Ephemeral Volumes
+On-disk files in a container are ephemeral as we saw in the last lesson. This presents some problems for applications that want to save long-lived data across restarts. For example, user data in a database.
+
+The Kubernetes volume abstraction solves two primary problems:
+
+Data persistence
+Data sharing across containers
+As it turns out, there are a lot of different types of "volumes" in Kubernetes. Some are even ephemeral as well, just like a container's standard filesystem. 
+The primary reason for using an ephemeral volume is to share data between containers in a pod.
+
+Add a volumes section to spec/template/spec.
+volumes:
+  - name: cache-volume
+    emptyDir: {}
+
+Add a new volumeMounts section to the container entry. This will mount the volume we just created at the /cache path.
+volumeMounts:
+  - name: cache-volume
+    mountPath: /cache
+
+Duplicate the entire first entry in the containers list twice (you should now have 3 total containers). Update the name of each:
+synergychat-crawler-1
+synergychat-crawler-2
+synergychat-crawler-3
+Now all the containers in the pod will share the same volume at /cache. It's just an empty directory, but the crawler will use it to store its data.
+
+Add a CRAWLER_DB_PATH environment variable to the crawler's ConfigMap. Set it to /cache/db. The crawler will use a directory called db inside the volume to store its data.
+Apply the new ConfigMap and Deployment, and use kubectl get pod to see the status of your new pod.
+You should notice that there's a problem with the pod! Only 1/3 of containers should be "ready". Use the logs command to get the logs for all 3 containers:
+
+kubectl logs <podname> --all-containers
+
+You should see something like this:
+
+listen tcp :8080: bind: address already in use
+
+Because pods share the same network namespace, they can't all bind to the same port! Hmm... let's put a bandaid on this by binding each container to a different port. 8080 is the only one that will 
+be exposed via the service, but that's okay for now. We can add redundancy later.
+
+Add two new values to the crawler's ConfigMap:
+
+CRAWLER_PORT_2: 8081
+
+CRAWLER_PORT_3: 8082
+
+Update the crawler deployment:
+
+Change the second and third containers to map CRAWLER_PORT_2 -> CRAWLER_PORT and CRAWLER_PORT_3 -> CRAWLER_PORT respectively (the Docker image expects a variable named "CRAWLER_PORT"). 
+I'm not going to give you the code, but know that it's gonna be a bit tedious because you need to use 
+env: instead of envFrom: for the second and third containers. Don't forget to continue exposing the CRAWLER_KEYWORDS and CRAWLER_DB_PATH environment variables for all containers.
+
+-------------------------
+
+-- Persistence
+
+All the volumes we've worked with so far have been ephemeral, meaning when the associated pod is deleted the volume is deleted as well. This is fine for some use cases, 
+but for most CRUD apps we want to persist data even if the pod is deleted.
+
+If you think about it, it's not even just when pods are explicitly deleted with kubectl that we need to worry about data loss. Pods can be deleted for several reasons:
+
+The node they're running on could fail
+A new version of the image was published (code was updated, etc)
+A new node was added to the cluster and the pod was rescheduled
+In all of these cases, we want to make sure that our data is still available. Persistent volumes allow us to do this.
+
+-- Persistent Volumes (PV)
+Instead of simply adding a volume to a deployment, a persistent volume is a cluster-level resource that is created separately from the pod and then attached to the pod. It's similar to a ConfigMap in that way.
+
+PVs can be created statically or dynamically.
+
+Static PVs are created manually by a cluster admin
+Dynamic PVs are created automatically when a pod requests a volume that doesn't exist yet
+Generally speaking, and especially in the cloud-native world, we want to use dynamic PVs. It's less work and more flexible.
+
+-- Persistent Volume Claims (PVC)
+A persistent volume claim is a request for a persistent volume. When using dynamic provisioning, a PVC will automatically create a PV if one doesn't exist that matches the claim.
+
+The PVC is then attached to a pod, just like a volume would be.
+
+-- Assignment
+Create a new file called api-pvc.yaml and add the following:
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: xxx
+spec:
+  accessModes:
+    - xxx
+  resources:
+    requests:
+      storage: xxx
+
+-- Add the following properties:
+
+metadata/name: synergychat-api-pvc
+spec/accessModes: An array with one entry:
+ReadWriteOnce
+spec/resources/requests/storage: 1Gi
+This creates a new PVC called synergychat-api-pvc with a few properties that can be read from and written to by multiple pods at the same time. It also requests 1GB of storage.
+
+Apply the PVC.
+
+kubectl apply -f api-pvc.yaml
+
+Run both of these commands:
+
+kubectl get pvc
+kubectl get pv
+
+You should see that a new PV was created automatically!
+
+-------------------------
+
+-- Attach Persistence
+So far all we've done is create an empty persistent volume. Let's get the api application to use it.
+
+Assignment
+Use your crawler deployment and the docs as a reference. Create a new volume in the api-deployment referencing your pvc:
+
+volumes:
+  - name: synergychat-api-volume
+    persistentVolumeClaim:
+      claimName: synergychat-api-pvc
+
+Then mount it in the container under the /persist directory:
+
+volumeMounts:
+  - name: synergychat-api-volume
+    mountPath: /persist
+
+Update the API_DB_FILEPATH environment variable you added earlier to instead use the new mount path: /persist/db.json
+
+Apply the changes, then check to make sure all your pods are healthy:
+
+kubectl get pods
+
+With your tunnel running (minikube tunnel -c), open http://synchat.internal/ in your browser.
+
+Send some messages.
+Delete the api pod.
+Once the new pod is running, refresh the page and make sure your messages are still there. If they are, your persistent volume is working!
+
+-------------------------
+
+-- Databases
+Now that you know all about volumes, you might be thinking, "Awesome! I'll host my CRUD app on Kubernetes and use a volume to store my PostgreSQL database data!".
+
+That's certainly possible, but frankly, it's not always the best idea. For example, the Boot.dev system that powers this website has the following components:
+
+A web application, currently served by Cloudflare (this could easily be a Kubernetes deployment if we cared to move it)
+Several backend microservices, all running on Kubernetes in Google Cloud
+Our main JSON CRUD API
+A Discord bot
+A service that compiles student's Go code to WASM
+etc
+A managed PostgreSQL database, hosted by Cloud SQL (GCP)
+Why do we do this? Well, Kubernetes isn't always the simplest way to get a job done. We could certainly host a PostgreSQL database on Kubernetes, but it would require a lot of extra work to get it to work well. 
+For example, we'd need to manually build all the configurations to:
+
+-- Create a persistent volume
+Handle Postgres version updates
+Set resource limits
+Set up automated backups
+For that reason, when I need an SQL database, I typically use a managed service like Cloud SQL or RDS. There are exceptions to that rule, but it's a good rule of thumb.
+
+-- When Would You Use a Database on Kubernetes?
+I have used databases on Kubernetes in the past, but I've usually done it when the deployment wasn't exactly mission-critical. For example, I've deployed Grafana and Prometheus on Kubernetes, 
+and they both have out-of-the-box support for in-cluster databases. I didn't care too much about backups and automatic upgrades for my telemetry data, and I knew the data set was small and static, so it was a good fit
+
+-------------------------
+
+Namespaces
+To quote the Zen of Python:
+
+Namespaces are one honking great idea -- let's do more of those!
+
+Namespaces are a way to isolate cluster resources into groups. They're a bit like directories on your computer, but instead of containing files, they contain Kubernetes objects. 
+As you've already learned, every resource in Kubernetes has a name. Some of our names include:
+
+synergychat-api-configmap
+api-service
+api-deployment
+web-deployment
+...
+You can only use a name once. It is a unique identifier. That's how kubectl apply knows when it should create a new resource and when it should update an existing one. 
+Namespaces allow us to use the same name for different resources, as long as they're in different namespaces.
+
+Run the following command:
+
+kubectl get namespaces
+
+or the shorter version:
+
+kubectl get ns
+
+-------------------------
+
 Use this to restart a deployment after updating and appying a config map:
 kubectl rollout restart deployment <deployment name> Use <kubectl get deployment> to get deployment name. 
 
 minikube tunnel -c
 minikube dashboard --port=63840
+
+Kubernetes is an orchestration system that manages containerized applications, typically running in Docker containers (though it can work with other container runtimes too).
+
+In this scenario:
+
+You have multiple pods running in your Kubernetes cluster
+Each pod contains one or more containers (which are typically Docker containers)
+The containers run your actual application code
+So rather than everything running in one Docker container, it's:
+
+Multiple Docker containers
+Grouped into pods (some pods have 1 container, the crawler pod has 3)
+All managed by Kubernetes
+This is more like a nested structure:
+
+Kubernetes cluster contains many pods
+Pods contain one or more containers
+Containers run your applications
+
+----------------------------
